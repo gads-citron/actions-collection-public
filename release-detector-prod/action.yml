@@ -1,0 +1,89 @@
+name: release-detector-prod
+description: Vérifie que la branche master n'est pas en avance sur le dernier tag
+
+inputs:
+  ssh-private-key:
+    description: ssh-private-key
+    required: true
+  gh-oauth-token:
+    description: gh-oauth-token
+    required: true
+  branch:
+    description: branch
+    required: true
+    default: master
+
+runs:
+  using: composite
+  steps:
+
+    - name: add ssh
+      shell: bash
+      run: |
+        sudo apt-get -yq update 
+        sudo apt-get -yqq install ssh git
+
+    - name: Install gh CLI
+      shell: bash
+      run: |
+        type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+        && sudo apt update \
+        && sudo apt install gh -y
+
+    - name: Install SSH Client
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ inputs.ssh-private-key }}
+
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        ref: ${{ inputs.branch }}
+        ssh-key:  ${{ inputs.ssh-private-key }}
+
+    - name: Fetch Tags
+      shell: bash
+      run: git fetch --tags
+
+    - name: Get Latest Tag
+      shell: bash
+      id: latest_tag
+      run: |
+        git describe --tags --abbrev=0
+        latest_tag=$(git describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*" )
+        echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+
+    - name: Check if Master is Ahead
+      shell: bash
+      id: diff
+      run: |
+        echo ${{ steps.latest_tag.outputs.tag }}
+        latest_tag="${{ steps.latest_tag.outputs.tag }}"
+        commit_count=$(git rev-list --count HEAD ^$latest_tag)
+        if [ $commit_count -gt 0 ]; then
+          echo "Master branch is $commit_count commits ahead of the latest tag ($latest_tag)."
+          echo "::set-output name=diff::true"
+        else
+          echo "Master branch is up to date with the latest tag ($latest_tag)."
+        fi
+
+    - name: create tag
+      if: steps.diff.outputs.diff == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-oauth-token }}
+      run: |
+        echo ${{ steps.latest_tag.outputs.tag }}
+        IFS='.' read -ra parts <<< "${{ steps.latest_tag.outputs.tag }}"
+        major="${parts[0]#v}"
+        minor="${parts[1]}"
+        incremented_minor=$((minor+1))
+        new_tag="v$major.$incremented_minor.0"
+        echo $new_tag
+        git tag "$new_tag"
+        git push --tags
+        gh release create "$new_tag" --generate-notes
